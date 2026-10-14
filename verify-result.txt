@@ -1,1 +1,1 @@
-# Appended by verify.ps1, one line per phase. Tracked as evidence.
+# One line per verify.ps1 phase: timestamp_utc | phase | os | seconds | detail
