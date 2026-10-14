@@ -1,0 +1,8 @@
+.venv/
+python/
+logs/
+.env
+verify-result.json
+__pycache__/
+.pytest_cache/
+# verify-result.txt is tracked on purpose: it is the evidence
