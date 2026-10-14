@@ -1,3 +1,4 @@
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   The measured result: how fast the service becomes ready, recovers from a kill,
@@ -41,6 +42,16 @@ $RecoverTimeoutSec = 90     # 30 s third-failure delay + a full start, with marg
 
 # -- helpers (same .env rules as app/config.py and svc.ps1) ----------------------
 
+function Format-Seconds([double]$seconds) {
+    # Invariant: a server with a Russian locale would otherwise write "6,42".
+    return $seconds.ToString('0.00', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-Stamp([string]$format) {
+    # ':' and '/' in a custom format are culture-specific separators; fix the culture.
+    return (Get-Date).ToUniversalTime().ToString($format, [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Read-DotEnv {
     $values = @{
         SERVICE_NAME = 'FastApiWorker'; SERVICE_DISPLAY_NAME = 'FastAPI Worker (reference)'
@@ -52,8 +63,9 @@ function Read-DotEnv {
             $line = $raw.Trim()
             if ($line -eq '' -or $line.StartsWith('#') -or -not $line.Contains('=')) { continue }
             if ($line.StartsWith('export ')) { $line = $line.Substring(7) }
-            $key, $value = $line.Split('=', 2)
-            $key = $key.Trim(); $value = $value.Trim()
+            $eq = $line.IndexOf('=')
+            $key = $line.Substring(0, $eq).Trim()
+            $value = $line.Substring($eq + 1).Trim()
             if ($value.Length -ge 2 -and $value[0] -eq $value[-1] -and ($value[0] -eq '"' -or $value[0] -eq "'")) {
                 $value = $value.Substring(1, $value.Length - 2)
             }
@@ -88,7 +100,7 @@ function Wait-Until([scriptblock]$condition, [double]$timeoutSec) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $timeoutSec) {
         $v = & $condition
-        if ($v) { return @{ Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 2); Value = $v } }
+        if ($v) { return @{ Seconds = $sw.Elapsed.TotalSeconds; Value = $v } }
         Start-Sleep -Milliseconds $PollMs
     }
     return $null
@@ -105,14 +117,17 @@ function Get-OsLabel {
     return "$($os.Caption.Trim()) $($os.Version)"
 }
 
-function Write-Result($phaseName, $seconds, $detail) {
-    $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    $line = "$stamp | $phaseName | $(Get-OsLabel) | $seconds s | $detail"
-    Add-Content -Path $ResultTxt -Value $line -Encoding UTF8
+$Utf8NoBom = New-Object System.Text.UTF8Encoding $false   # Set-Content -Encoding UTF8 writes a BOM on 5.1
+
+function Write-Result($phaseName, [double]$seconds, $detail) {
+    $stamp = Get-Stamp 'yyyy-MM-ddTHH:mm:ssZ'
+    $rounded = [math]::Round($seconds, 2)
+    $line = "$stamp | $phaseName | $(Get-OsLabel) | $(Format-Seconds $rounded) s | $detail"
+    [System.IO.File]::AppendAllText($ResultTxt, $line + "`r`n", $Utf8NoBom)
     Write-Host "RESULT: $line"
     $script:Results += [pscustomobject]@{
         timestamp = $stamp; phase = $phaseName; os = (Get-OsLabel)
-        seconds = $seconds; detail = $detail
+        seconds = $rounded; detail = $detail
     }
 }
 
@@ -165,7 +180,7 @@ function Phase-Kill {
         $v = Get-Json "$base/version"
         if ($v -and $v.started_at -ne $before.started_at) { $v } else { $null }
     } $RecoverTimeoutSec
-    $seconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+    $seconds = $sw.Elapsed.TotalSeconds
     if (-not $hit) {
         & sc.exe query $name
         & sc.exe qfailure $name
@@ -180,18 +195,22 @@ function Phase-AfterReboot {
     $cfg = Read-DotEnv; $name = $cfg.SERVICE_NAME; $base = Get-BaseUrl $cfg
     $null = Get-ServicePid $name        # fails with a clear message when not installed
     $os = Get-CimInstance Win32_OperatingSystem
+    # Get-CimInstance returns LastBootUpTime as a local DateTime (Get-WmiObject would give a DMTF string).
     $boot = $os.LastBootUpTime.ToUniversalTime()
     Write-Host "last boot (UTC): $($boot.ToString('o'))"
-    $state = (& sc.exe query $name | Select-String 'STATE').Line.Trim()
-    Write-Host "sc query: $state"
+    # Get-Service for the state label: sc.exe output text is not something to parse.
+    $state = "state $((Get-Service -Name $name).Status)"
+    Write-Host "sc query:"
+    & sc.exe query $name
     # Delayed auto-start begins about two minutes after boot; allow that plus the start itself.
     $hit = Wait-Until { Get-Json "$base/version" } 240
     if (-not $hit) {
         Show-LogTail
         throw "no 200 from $base/version within 240 s after this check began; $state; see logs\service.log and the System event log"
     }
-    $startedAt = [DateTimeOffset]::Parse($hit.Value.started_at, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
-    $seconds = [math]::Round(($startedAt - $boot).TotalSeconds, 2)
+    # started_at carries an offset ("+00:00"); DateTimeOffset keeps it, [DateTime] would shift it to local time.
+    $startedAt = [DateTimeOffset]::Parse($hit.Value.started_at, [System.Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+    $seconds = ($startedAt - $boot).TotalSeconds
     if ($startedAt -lt $boot) {
         throw "started_at $($hit.Value.started_at) is before the last boot: the service was not restarted by this boot; run this phase after a reboot"
     }
@@ -201,12 +220,13 @@ function Phase-AfterReboot {
 # -- main --------------------------------------------------------------------------
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-Start-Transcript -Path (Join-Path $LogDir 'verify.log') -Append | Out-Null
+# A transcript that cannot start (one is already running in this host) must not stop the phase.
+try { Start-Transcript -Path (Join-Path $LogDir 'verify.log') -Append | Out-Null } catch { Write-Warning "no transcript: $($_.Exception.Message)" }
 [System.Net.WebRequest]::DefaultWebProxy = $null   # no proxy detection on loopback
 $script:Results = @()
 $exitCode = 0
 try {
-    Write-Host "== verify.ps1 -Phase $Phase  ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
+    Write-Host "== verify.ps1 -Phase $Phase  ($(Get-Stamp 'yyyy-MM-dd HH:mm:ss') UTC)"
     switch ($Phase) {
         'Start'       { Phase-Start }
         'Kill'        { Phase-Kill }
@@ -219,8 +239,9 @@ try {
     $exitCode = 1
 } finally {
     if ($script:Results.Count -gt 0) {
-        ConvertTo-Json -InputObject @($script:Results) -Depth 3 | Set-Content -Path $ResultJson -Encoding UTF8
+        $json = ConvertTo-Json -InputObject @($script:Results) -Depth 3
+        [System.IO.File]::WriteAllText($ResultJson, $json, $Utf8NoBom)
     }
-    Stop-Transcript | Out-Null
+    try { Stop-Transcript | Out-Null } catch { }
 }
 exit $exitCode

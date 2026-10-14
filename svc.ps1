@@ -1,3 +1,4 @@
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   Install, start, stop, inspect and remove the FastAPI worker Windows service.
@@ -42,6 +43,16 @@ $ReadyTimeoutSec = 60
 
 # -- helpers -------------------------------------------------------------------
 
+function Format-Seconds([double]$seconds) {
+    # Invariant: a server with a Russian locale would otherwise write "6,42".
+    return $seconds.ToString('0.00', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-Stamp([string]$format) {
+    # ':' and '/' in a custom format are culture-specific separators; fix the culture.
+    return (Get-Date).ToUniversalTime().ToString($format, [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Read-DotEnv {
     # Same rules as app/config.py: KEY=VALUE, # comments, optional quotes,
     # optional "export " prefix; the process environment wins over the file.
@@ -55,8 +66,9 @@ function Read-DotEnv {
             $line = $raw.Trim()
             if ($line -eq '' -or $line.StartsWith('#') -or -not $line.Contains('=')) { continue }
             if ($line.StartsWith('export ')) { $line = $line.Substring(7) }
-            $key, $value = $line.Split('=', 2)
-            $key = $key.Trim(); $value = $value.Trim()
+            $eq = $line.IndexOf('=')
+            $key = $line.Substring(0, $eq).Trim()
+            $value = $line.Substring($eq + 1).Trim()
             if ($value.Length -ge 2 -and $value[0] -eq $value[-1] -and ($value[0] -eq '"' -or $value[0] -eq "'")) {
                 $value = $value.Substring(1, $value.Length - 2)
             }
@@ -88,7 +100,7 @@ function Wait-Ready($url, $timeoutSec) {
     # Polls every 100 ms. Returns seconds to the first 200, or $null.
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $timeoutSec) {
-        if (Test-Ready $url) { return [math]::Round($sw.Elapsed.TotalSeconds, 2) }
+        if (Test-Ready $url) { return $sw.Elapsed.TotalSeconds }
         Start-Sleep -Milliseconds 100
     }
     return $null
@@ -103,7 +115,10 @@ function Get-BasePython {
     # That interpreter, not .venv\Scripts\python.exe, is what the SCM must start.
     $cfg = Join-Path $Root '.venv\pyvenv.cfg'
     if (-not (Test-Path $cfg)) { throw ".venv\pyvenv.cfg not found: run .\svc.ps1 -Step Sync" }
-    $home_ = (Get-Content $cfg | Where-Object { $_ -match '^\s*home\s*=\s*(.+)$' } | ForEach-Object { $Matches[1].Trim() } | Select-Object -First 1)
+    $home_ = $null
+    foreach ($line in Get-Content $cfg) {
+        if ($line -match '^\s*home\s*=\s*(.+)$') { $home_ = $Matches[1].Trim(); break }
+    }
     if (-not $home_) { throw "no 'home =' line in ${cfg}: delete .venv and run .\svc.ps1 -Step Sync" }
     $exe = Join-Path $home_ 'python.exe'
     if (-not (Test-Path $exe)) { throw "base interpreter $exe not found: run .\svc.ps1 -Step Sync" }
@@ -111,7 +126,12 @@ function Get-BasePython {
 }
 
 function Invoke-Checked([string]$what, [scriptblock]$block) {
+    # Native tools (uv, sc.exe, icacls) report through their exit code, which is
+    # checked here. Their stderr output is progress, not failure: on 5.1 with
+    # ErrorActionPreference=Stop some hosts turn it into a terminating error, so
+    # the preference is relaxed for the duration of the call (function scope).
     Write-Host ">> $what"
+    $ErrorActionPreference = 'Continue'
     & $block
     if ($LASTEXITCODE -ne 0) { throw "$what failed with exit code $LASTEXITCODE (see output above)" }
 }
@@ -262,7 +282,7 @@ function Step-Start {
         throw "no 200 from $url within $ReadyTimeoutSec s: read the log tail above; a 503 means REQUIRED_SETTING is empty in .env"
     }
     $pid_ = (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId
-    Write-Host "ready after $seconds s (pid $pid_) at $url"
+    Write-Host "ready after $(Format-Seconds $seconds) s (pid $pid_) at $url"
 }
 
 function Step-Stop {
@@ -274,7 +294,7 @@ function Step-Stop {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     Stop-Service -Name $name
     $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
-    Write-Host "stopped in $([math]::Round($sw.Elapsed.TotalSeconds, 2)) s"
+    Write-Host "stopped in $(Format-Seconds $sw.Elapsed.TotalSeconds) s"
 }
 
 function Step-Status {
@@ -317,18 +337,19 @@ function Step-Uninstall {
 # -- main ----------------------------------------------------------------------
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-Start-Transcript -Path (Join-Path $LogDir 'svc.log') -Append | Out-Null
+# A transcript that cannot start (one is already running in this host) must not stop the step.
+try { Start-Transcript -Path (Join-Path $LogDir 'svc.log') -Append | Out-Null } catch { Write-Warning "no transcript: $($_.Exception.Message)" }
 # Loopback calls must not wait for proxy auto-detection; it would also skew timings.
 [System.Net.WebRequest]::DefaultWebProxy = $null
 $exitCode = 0
 try {
-    Write-Host "== svc.ps1 -Step $Step  ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
+    Write-Host "== svc.ps1 -Step $Step  ($(Get-Stamp 'yyyy-MM-dd HH:mm:ss') UTC)"
     & "Step-$Step"
     Write-Host "== $Step done"
 } catch {
     Write-Host "ERROR: $($_.Exception.Message)"
     $exitCode = 1
 } finally {
-    Stop-Transcript | Out-Null
+    try { Stop-Transcript | Out-Null } catch { }
 }
 exit $exitCode
