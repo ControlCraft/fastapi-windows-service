@@ -84,6 +84,11 @@ Other steps: `.\svc.ps1 -Step Start|Stop|Status|Uninstall`. `Uninstall` removes 
 service registration and keeps all files, `.env` and logs. Nothing in these scripts
 deletes anything. `.\svc.ps1 -Step Install -RunAsLocalSystem` skips the account
 step, which is useful to separate permission problems from everything else.
+Running `Install` again on a machine where the service exists stops it and updates
+the registration in place, so it is also the upgrade path after `git pull`.
+
+Both scripts write a transcript: `logs\svc.log` and `logs\verify.log`. The service
+itself writes `logs\service.log`.
 
 ## Measured on Windows Server 2016
 
@@ -94,7 +99,10 @@ step, which is useful to separate permission problems from everything else.
 | Boot to ready (`started_at` minus `LastBootUpTime`) | TBD | TBD |
 
 The kill measurement is expected to be a little over 5 seconds: the first SCM
-restart delay is 5000 ms, then the interpreter starts and the server binds.
+restart delay is 5000 ms, then the interpreter starts and the server binds. The SCM
+counts failures inside a 24-hour window (`reset= 86400`) and uses 5, 10 and then 30 s
+for the first, second and later failures, so a second `Kill` run on the same day
+measures the 10 s delay. The row above is the first run after install.
 
 ## Adapting it to a real worker
 
@@ -154,6 +162,7 @@ and restart the service.
 ## Layout
 
 ```
+pyproject.toml       uv project; uv.lock is universal and committed; .python-version pins 3.12
 app/config.py        settings from .env and the process environment, stdlib only
 app/main.py          FastAPI application: /health/live, /health/ready, /version, POST /echo
 service.py           pywin32 service host; also the install/start/stop/remove/debug CLI
