@@ -1,1 +1,3 @@
-# One line per verify.ps1 phase: timestamp_utc | phase | os | seconds | detail
+2026-10-15T05:52:48Z | Start | Microsoft Windows Server 2016 Standard 10.0.14393 | 1.25 s | service start to first 200 from /health/ready; pid 2348; started_at 2026-10-15T05:52:47.369+00:00
+2026-10-15T05:52:54Z | Kill | Microsoft Windows Server 2016 Standard 10.0.14393 | 6.17 s | taskkill /F to 200 from a new process; pid 2348 -> 5232; started_at 2026-10-15T05:52:54.408+00:00; SCM first-failure delay is 5 s
+2026-10-15T06:25:29Z | AfterReboot | Microsoft Windows Server 2016 Standard 10.0.14393 | 163.61 s | boot to started_at (delayed auto-start); state Running; pid 3860

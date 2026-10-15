@@ -6,6 +6,12 @@ no pythonservice.exe. The interpreter is Python 3.12 managed by uv and installed
 under the project directory. The service host is `service.py`, a pywin32
 `ServiceFramework` subclass that runs uvicorn in-process.
 
+Everything in this repository was run end to end on Microsoft Windows Server 2016
+Standard (10.0.14393) with Windows PowerShell 5.1, Python 3.12.15 managed by uv 0.13.1,
+with the service running as the virtual account `NT SERVICE\FastApiWorker`. The
+numbers in the measured table below come from that run, on the first attempt, with
+no script changes.
+
 The worker itself is domain-neutral on purpose. It exposes a readiness contract,
 a version endpoint and one working endpoint (`POST /echo`) that stands in for the
 real job. The point of the repository is the deployment: how the service is
@@ -92,17 +98,23 @@ itself writes `logs\service.log`.
 
 ## Measured on Windows Server 2016
 
-| Measurement | Seconds | Source line in verify-result.txt |
-| --- | --- | --- |
-| Service start to first `200` from `/health/ready` | TBD | TBD |
-| Process killed with `taskkill /F` to `200` from a new process | TBD | TBD |
-| Boot to ready (`started_at` minus `LastBootUpTime`) | TBD | TBD |
+Measured on 2026-10-15 on Microsoft Windows Server 2016 Standard 10.0.14393, Windows
+PowerShell 5.1, Python 3.12.15 (uv-managed, under `<root>\python`), uv 0.13.1. The
+service ran as `NT SERVICE\FastApiWorker`. Values are copied from `verify-result.txt`,
+which `verify.ps1` wrote on that machine; the three lines there are the raw record.
 
-The kill measurement is expected to be a little over 5 seconds: the first SCM
-restart delay is 5000 ms, then the interpreter starts and the server binds. The SCM
-counts failures inside a 24-hour window (`reset= 86400`) and uses 5, 10 and then 30 s
-for the first, second and later failures, so a second `Kill` run on the same day
-measures the 10 s delay. The row above is the first run after install.
+| Measurement | Seconds | What the number contains |
+| --- | --- | --- |
+| Service start to first `200` from `/health/ready` | 1.25 | From `sc start` returning to the first `200`: interpreter start, imports, uvicorn bind and the first successful poll, in the service process (pid 2348). |
+| Process killed with `taskkill /F` to `200` from a new process | 6.17 | Includes the 5 s first-restart delay of the SCM failure policy; the remainder is a full service start by the SCM into a new process (pid 2348 to 5232), proven by a changed `started_at`. |
+| Boot to ready (`started_at` minus `LastBootUpTime`) | 163.61 | From kernel boot to the worker's `started_at`, including the delayed auto-start wait behind the other automatic services; the state at check time was Running (pid 3860). |
+
+The SCM counts failures inside a 24-hour window (`reset= 86400`) and uses 5, 10 and
+then 30 s for the first, second and later failures, so a second `Kill` run on the same
+day measures the 10 s delay. The row above is the first run after install.
+
+The unit tests ran on the same machine: 9 passed, including the two Windows-only tests
+that check `SERVICE_RUNNING` through the SCM API and a `200` from `/health/ready`.
 
 ## Adapting it to a real worker
 
@@ -173,7 +185,8 @@ tests/               pytest; the Windows test skips unless run as administrator 
 verify-result.txt    one line per verify phase, tracked as evidence
 ```
 
-Run the unit tests with `uv run --group dev pytest`.
+Run the unit tests with `uv run --group dev pytest`. Off Windows the two service
+tests skip; on the measured server all 9 passed.
 
 ## License
 
