@@ -43,6 +43,8 @@ Decisions, and why.
 (5) Logging goes to logs\service.log through a RotatingFileHandler on the root
     logger. uvicorn is configured with log_config=None so its loggers keep
     propagating to the root. A service has no console; "debug" mode adds one.
+    Timestamps are UTC with a Z suffix, the same clock as started_at in
+    /version and as verify-result.txt.
 
 (6) An unhandled exception is logged and re-raised out of SvcRun. pywin32's host
     (PythonService.cpp, service_main) then reports STOPPED with
@@ -79,14 +81,24 @@ STOP_JOIN_S = STOP_GRACEFUL_S + 5
 WAIT_HINT_MS = 10_000
 
 
+class UtcFormatter(logging.Formatter):
+    """UTC with an explicit Z, same clock as started_at and verify-result.txt.
+    Local time without a zone made the two files impossible to line up."""
+
+    converter = time.gmtime
+    default_time_format = "%Y-%m-%dT%H:%M:%S"
+    default_msec_format = "%s.%03dZ"
+
+
+LOG_FORMAT = "%(asctime)s %(levelname)s pid=%(process)d %(name)s: %(message)s"
+
+
 def _configure_logging() -> logging.Logger:
     LOG_DIR.mkdir(exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(
         LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s pid=%(process)d %(name)s: %(message)s")
-    )
+    handler.setFormatter(UtcFormatter(LOG_FORMAT))
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.addHandler(handler)
@@ -294,7 +306,7 @@ def main(argv: list[str]) -> int:
 
     if "debug" in argv:
         console = logging.StreamHandler()
-        console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        console.setFormatter(UtcFormatter(LOG_FORMAT))
         logging.getLogger().addHandler(console)
         print(f"log file: {LOG_FILE}")
 
